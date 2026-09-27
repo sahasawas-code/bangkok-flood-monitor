@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BANGKOK FLOOD MONITOR</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<style>
+  :root{
+    --bg:#0b1220; --panel:#131c2e; --text:#e8edf5; --muted:#93a2b8;
+    --green:#22c55e; --yellow:#eab308; --orange:#f97316; --red:#ef4444; --border:#22304a;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
+  header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
+  header h1{margin:0;font-size:1.2rem;letter-spacing:.5px;}
+  #lastUpdate{color:var(--muted);font-size:.85rem;}
+  #statusBadge{padding:4px 12px;border-radius:999px;font-weight:600;font-size:.8rem;}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px 20px;}
+  @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr);}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;}
+  .card h3{margin:0 0 6px;font-size:.85rem;color:var(--muted);font-weight:500;}
+  .card .val{font-size:1.6rem;font-weight:700;}
+  .card .sub{font-size:.75rem;color:var(--muted);margin-top:4px;}
+  #map{height:60vh;margin:0 20px 20px;border-radius:12px;border:1px solid var(--border);}
+  .banner{margin:0 20px;padding:10px 14px;border-radius:10px;font-size:.85rem;}
+  .banner.err{background:#2a1420;border:1px solid var(--red);color:#fca5a5;}
+  .banner.stale{background:#2a2314;border:1px solid var(--yellow);color:#fde68a;}
+  footer{padding:16px 20px;color:var(--muted);font-size:.75rem;}
+  code{background:#0f1726;padding:2px 6px;border-radius:4px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🌊 BANGKOK FLOOD MONITOR</h1>
+  <div>
+    <span id="statusBadge" style="background:var(--muted);">LOADING…</span>
+    <span id="lastUpdate">เวลาอัปเดตล่าสุด: —</span>
+  </div>
+</header>
+
+<div id="banners"></div>
+
+<div class="grid">
+  <div class="card">
+    <h3>🌧️ ฝนล่าสุด (1 ชม. สูงสุด)</h3>
+    <div class="val" id="rainNow">—</div>
+    <div class="sub" id="rainNowSub">รอข้อมูล…</div>
+  </div>
+  <div class="card">
+    <h3>📊 จำนวนสถานีที่มีข้อมูล</h3>
+    <div class="val" id="stationCount">—</div>
+    <div class="sub">จาก rain_bkk_latest.json</div>
+  </div>
+  <div class="card">
+    <h3>🛰️ Radar (ภาพจาก TMD)</h3>
+    <div class="val" style="font-size:.9rem;">
+      <a href="https://weather.tmd.go.th/pic_bmancLoop.gif" target="_blank" style="color:#7dd3fc;">เปิดภาพเรดาร์ (loop)</a>
+    </div>
+    <div class="sub">ลิงก์ตรงจาก TMD — ยังไม่ได้ทำ proxy รูปภาพ</div>
+  </div>
+  <div class="card">
+    <h3>⚠️ สถานะระบบ</h3>
+    <div class="val" id="engineStatus">รอข้อมูล</div>
+    <div class="sub">V1 ยังไม่มี Risk Engine (ต้องเพิ่มระดับน้ำ/จุดน้ำท่วมก่อน)</div>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<footer>
+  หมายเหตุ: ข้อมูลฝนเป็น <b>near-real-time</b> ตามรอบอัปเดตของ TMD ไม่ใช่ realtime แบบวินาทีต่อวินาที
+  ระบบนี้เป็น V1 (เฉพาะฝน + แผนที่) — ยังไม่รวมระดับน้ำ / จุดน้ำท่วม / Risk Engine ตามแผนในเอกสารโครงการ.
+  ข้อมูลดึงตรงจาก TMD ผ่านพร็อกซี่สาธารณะ (ไม่ต้องมี backend ของตัวเอง) — ถ้าพร็อกซี่ล่ม ลองรีเฟรชอีกครั้ง.
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ปรับ URL นี้ให้ตรงกับที่รัน backend จริง — ปล่อยว่างไว้ได้ ถ้าไม่ได้ deploy backend ของตัวเอง
+// (ตอนนี้ default ใช้พร็อกซี่สาธารณะดึงข้อมูลจาก TMD ตรง ไม่ต้องมี backend เลย)
+const BACKEND_URL = ""; // เว้นว่างไว้ = ใช้พร็อกซี่สาธารณะ (ดูฟังก์ชัน fetchTmdJson ด้านล่าง)
+
+const TMD_LATEST_URL = "https://satda.tmd.go.th/wp-content/uploads/nowcasting/bkk/rain_bkk_latest.json";
+
+// ดึง JSON จาก TMD ผ่านพร็อกซี่สาธารณะ (แก้ปัญหา CORS แบบไม่ต้องมี backend ของตัวเอง)
+// ลองสองตัว เผื่อตัวแรกล่ม/ช้า
+async function fetchTmdJson(targetUrl) {
+  const proxies = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`,
+    `https://thingproxy.freeboard.io/fetch/${targetUrl}`,
+  ];
+  let lastErr;
+  for (const proxyUrl of proxies) {
+    try {
+      const res = await fetch(proxyUrl, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+const map = L.map('map').setView([13.7563, 100.5018], 11); // ศูนย์กลางกรุงเทพฯ
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles &copy; Esri',
+  maxZoom: 19,
+}).addTo(map);
+
+let markers = [];
+
+function clearMarkers(){
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+}
+
+function setBadge(ok){
+  const el = document.getElementById('statusBadge');
+  if(ok){ el.textContent = 'ONLINE'; el.style.background = 'var(--green)'; el.style.color = '#04240f'; }
+  else { el.textContent = 'ERROR'; el.style.background = 'var(--red)'; el.style.color = '#2a0a0a'; }
+}
+
+function showBanner(msg, kind){
+  const wrap = document.getElementById('banners');
+  const div = document.createElement('div');
+  div.className = 'banner ' + kind;
+  div.textContent = msg;
+  wrap.appendChild(div);
+}
+
+function normalizeStation(rec){
+  const province = rec.province || rec.province_th || null;
+  const amphoe = rec.amphoe || null;
+  const stationLabel = [amphoe, province].filter(Boolean).join(', ') || null;
+  return {
+    id: rec.id ?? null,
+    lat: rec.lat ?? null,
+    lon: rec.lon ?? null,
+    station: stationLabel,
+    rainfall: (typeof rec.rain_1h === 'number') ? rec.rain_1h : null,
+    rainfall_24h: (typeof rec.rain_24h === 'number') ? rec.rain_24h : null,
+    timestamp: rec.time ?? null,
+  };
+}
+
+async function loadRain(){
+  document.getElementById('banners').innerHTML = '';
+  try{
+    const raw = await fetchTmdJson(TMD_LATEST_URL);
+    const stationsRaw = Array.isArray(raw.stations) ? raw.stations : [];
+    const records = stationsRaw.map(normalizeStation);
+
+    setBadge(true);
+    document.getElementById('lastUpdate').textContent =
+      `เวลาอัปเดตล่าสุด (ต้นทาง TMD): ${raw.updated_at || 'ไม่ทราบ'} | ดึงเมื่อ: ${new Date().toLocaleString('th-TH')}`;
+
+    document.getElementById('stationCount').textContent = records.length;
+
+    clearMarkers();
+    let maxRain = null, maxStation = null;
+
+    records.forEach(rec => {
+      if(rec.lat != null && rec.lon != null){
+        const m = L.circleMarker([rec.lat, rec.lon], {
+          radius: 6,
+          color: '#38bdf8',
+          fillOpacity: 0.7,
+        }).addTo(map);
+        m.bindPopup(`<b>${rec.station ?? 'สถานี'}</b><br>ฝน 1 ชม.: ${rec.rainfall ?? 'N/A'} mm<br>ฝน 24 ชม.: ${rec.rainfall_24h ?? 'N/A'} mm<br>เวลา: ${rec.timestamp ?? 'N/A'}`);
+        markers.push(m);
+      }
+      if(typeof rec.rainfall === 'number' && (maxRain === null || rec.rainfall > maxRain)){
+        maxRain = rec.rainfall;
+        maxStation = rec.station;
+      }
+    });
+
+    if(maxRain !== null){
+      document.getElementById('rainNow').textContent = `${maxRain} mm`;
+      document.getElementById('rainNowSub').textContent = `สถานี: ${maxStation ?? 'ไม่ทราบชื่อ'}`;
+    } else {
+      document.getElementById('rainNow').textContent = 'N/A';
+      document.getElementById('rainNowSub').textContent = 'ไม่พบสถานีที่มีค่า rain_1h เป็นตัวเลข';
+    }
+
+    document.getElementById('engineStatus').textContent = 'V1: แสดงฝนอย่างเดียว';
+  } catch(err){
+    setBadge(false);
+    showBanner('ดึงข้อมูลจาก TMD ไม่ได้ (ผ่านพร็อกซี่สาธารณะ): ' + err + ' — ลองรีเฟรชอีกครั้ง ถ้ายังไม่ได้อาจเป็นเพราะพร็อกซี่ล่มชั่วคราว', 'err');
+  }
+}
+
+loadRain();
+setInterval(loadRain, 5 * 60 * 1000); // auto refresh ทุก 5 นาที — ปรับตามความถี่จริงของ TMD
+</script>
+</body>
+</html>
